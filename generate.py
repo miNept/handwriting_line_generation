@@ -256,11 +256,8 @@ def main(resume,saveDir,gpu=None,config=None,addToConfig=None, fromDataset=True,
 
     with torch.no_grad():
         while True:
-            if arguments is None:
-                action = input('indexes/random interp/vae random/strech/author display/math/turk gen/from-to/umap-images/Random styles/help/quit? ') #indexes/random/vae/strech/author-list/quit
-            else:
-                action = arguments['choice']
-                arguments['choice']='q'
+
+            action = "onestyle"
             if action=='done' or action=='exit' or 'action'=='quit' or action=='q':
                 exit()
             elif action[0]=='h': #help
@@ -694,6 +691,51 @@ def main(resume,saveDir,gpu=None,config=None,addToConfig=None, fromDataset=True,
                         #print('wrote: {}'.format(path))
                         cv2.imwrite(path,genStep)
 
+            elif action=='onestyle':  #from given image's style to other image's style. not interpolate
+            
+                paths = []
+                text_gen = arguments["text_gen"]
+                for n in range(int(arguments['image_count'])):
+                    paths.append(arguments[f"path{n}"])
+
+                img_height=64
+
+                images = []
+                for n in range(int(arguments['image_count'])):
+                    image = cv2.imread(paths[n],0)
+                    if image.shape[0] != img_height:
+                        percent = float(img_height) / image.shape[0]
+                        image = cv2.resize(image, (0,0), fx=percent, fy=percent, interpolation = cv2.INTER_CUBIC)
+                    image = image[...,None]
+                    image = image.astype(np.float32)
+                    image = 1.0 - image / 128.0
+                    image = image.transpose([2,0,1])
+                    image = torch.from_numpy(image)
+                    if gpu is not None:
+                        image=image.to(gpu)
+                    images.append(image)
+
+                min_width = min([image.size(2) for image in images])
+                style = model.extract_style(torch.stack([image[:,:,:min_width] for image in images],dim=0),None,1)
+                
+                if type(style) is tuple:
+                    style1 = (style[0][0:1],style[1][0:1],style[2][0:1])
+                    style2 = (style[0][1:2],style[1][1:2],style[2][1:2])
+                else:
+                    style1 = style[0:1]
+                    style2 = style[1:2]
+                
+                style = [s.view(1,-1) for s in style]
+                images,stylesInter=interpolate(model,style, text_gen,char_to_idx,gpu)
+                print(len(images))
+                for b in range(images[0].size(0)):
+                    for i in range(len(images)):
+                        genStep = ((1-images[i][b].permute(1,2,0))*127.5).cpu().numpy().astype(np.uint8)
+                        path = os.path.join(saveDir,'gen{}_{}.png'.format(b,i))
+                        #print('wrote: {}'.format(path))
+                        cv2.imwrite(path,genStep)
+                exit()
+
 
             elif action[0]=='u': #Umap images, and image for every style, this was to replicate figure in GANWriting paper, but we didn't end up using it. May not work
                 per_author=3
@@ -804,28 +846,18 @@ def generate(model,style,text,char_to_idx,gpu):
     return model(label,label_len,style)
 
 # generates a series of images interpolating between the styles
-def interpolate(model,style1,style2,text,char_to_idx,gpu,step=0.05):
-    if type(style1) is tuple:
-        batch_size = style1[0].size(0)
-    else:
-        batch_size = style1.size(0)
+def interpolate(model,styles,text,char_to_idx,gpu,step=0.05):
+    batch_size = styles[0].size(0)
     label = string_utils.str2label_single(text, char_to_idx)
     label = torch.from_numpy(label.astype(np.int32))[:,None].expand(-1,batch_size).to(gpu).long()
     label_len = torch.IntTensor(batch_size).fill_(len(text))
     results=[]
-    styles=[]
-    for alpha in np.arange(0,1.0,step):
-        if type(style1) is tuple:
-            style = (style2[0]*alpha+(1-alpha)*style1[0],style2[1]*alpha+(1-alpha)*style1[1],style2[2]*alpha+(1-alpha)*style1[2])
-        else:
-            style = style2*alpha+(1-alpha)*style1
+    result_styles = []
+    for style in styles:
         gen = model(label,label_len,style)
         results.append(gen)
-        if type(style) is tuple:
-            styles.append((style[0].cpu().detach(),style[1].cpu().detach(),style[2].cpu().detach()))
-        else:
-            styles.append(style.cpu().detach())
-    return results, styles
+        result_styles.append(style.cpu().detach())
+    return results, result_styles
 
 def interpolate_horz(model,style,spaced_label):
     results=[]
@@ -958,6 +990,7 @@ if __name__ == '__main__':
             arguments[ss[0]]=ss[1]
     else:
         arguments=None
+        
     if args.gpu is not None:
         with torch.cuda.device(args.gpu):
             main(args.checkpoint, args.savedir, gpu=args.gpu,  config=args.config, addToConfig=addtoconfig, test =args.test,arguments=arguments, style_loc=args.style_loc)
